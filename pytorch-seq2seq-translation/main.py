@@ -11,8 +11,9 @@ from torch.autograd import Variable
 from torch import optim
 import torch.nn.functional as F
 from tensorboardX import SummaryWriter
+import uuid
 
-writer = SummaryWriter('logs')
+writer = SummaryWriter('logs/%s' % uuid.uuid1())
 
 SOS_token = 0
 EOS_token = 1
@@ -225,7 +226,7 @@ def train(pairs, encoder, decoder, n_iters, learning_rate=0.01):
 
         # input_var: ['32', '11', '4'] => English
         for index in range(input_length):
-            encoder_output, encoder_hidden =  encoder(input_var[index], encoder_hidden)
+            encoder_output, encoder_hidden = encoder(input_var[index], encoder_hidden)
             encoder_outputs[index] = encoder_output
 
         decoder_input = Variable(torch.LongTensor([SOS_token])).cuda()
@@ -240,11 +241,11 @@ def train(pairs, encoder, decoder, n_iters, learning_rate=0.01):
             if teacher_flag:
                 decoder_input = target_var[index]
             else:
-                _, topi = decoder_output.data.topk(1)
+                value, topi = decoder_output.data.topk(1)
                 if topi[0][0] == EOS_token:
                     break
                 else:
-                    decoder_input = Variable(torch.LongTensor([[topi[0][0]]])).cuda()
+                    decoder_input = Variable(torch.LongTensor([topi[0][0]])).cuda()
         encoder_optimizer.zero_grad()
         decoder_optimizer.zero_grad()
         loss.backward()
@@ -254,56 +255,41 @@ def train(pairs, encoder, decoder, n_iters, learning_rate=0.01):
         if i % 200 == 0:
             print('%d: loss:%.4f' % (i, loss.data[0] / target_length))
 
-        writer.add_scalar('loss', loss.data[0] / target_length)
+        writer.add_scalar('loss', loss.data[0] / target_length, i)
 
+def evaluate(pairs, encoder, decoder, cnt=10):
+    encoder.eval()
+    decoder.eval()
+    evaluate_pairs = [pair_to_var(random.choice(pairs)) for i in range(cnt)]
+    for i in range(cnt):
+        input_var, groundtruth_var = evaluate_pairs[i][0], evaluate_pairs[i][1]
+        encoder_hidden = encoder.init_hidden()
+        input_length = input_var.size()[0]
+        encoder_outputs = Variable(torch.zeros(MAX_LENGTH, encoder.hidden_size)).cuda()
+        for index in range(input_length):
+            encoder_output, encoder_hidden = encoder(input_var[index], encoder_hidden)
+            encoder_outputs[index] = encoder_output
 
-#
-# ######################################################################
-# # 评估
-# # ==========
-# #
-# # 评估与训练大部分相同,但没有目标,因此我们只是将解码器的每一步预测反馈给它自身.
-# # 每当它预测到一个单词时,我们就会将它添加到输出字符串中,并且如果它预测到我们在那里停止的EOS指令.
-# # 我们还存储解码器的注意力输出以供稍后显示.
-# #
-#
-# def evaluate(encoder, decoder, sentence, max_length=MAX_LENGTH):
-#     input_variable = variableFromSentence(input_lang, sentence)
-#     input_length = input_variable.size()[0]
-#     encoder_hidden = encoder.initHidden()
-#
-#     encoder_outputs = Variable(torch.zeros(max_length, encoder.hidden_size))
-#     encoder_outputs = encoder_outputs.cuda() if use_cuda else encoder_outputs
-#
-#     for ei in range(input_length):
-#         encoder_output, encoder_hidden = encoder(input_variable[ei],
-#                                                  encoder_hidden)
-#         encoder_outputs[ei] = encoder_outputs[ei] + encoder_output[0][0]
-#
-#     decoder_input = Variable(torch.LongTensor([[SOS_token]]))  # SOS
-#     decoder_input = decoder_input.cuda() if use_cuda else decoder_input
-#
-#     decoder_hidden = encoder_hidden
-#
-#     decoded_words = []
-#     decoder_attentions = torch.zeros(max_length, max_length)
-#
-#     for di in range(max_length):
-#         decoder_output, decoder_hidden, decoder_attention = decoder(
-#             decoder_input, decoder_hidden, encoder_outputs)
-#         decoder_attentions[di] = decoder_attention.data
-#         topv, topi = decoder_output.data.topk(1)
-#         ni = topi[0][0]
-#         if ni == EOS_token:
-#             decoded_words.append('<EOS>')
-#             break
-#         else:
-#             decoded_words.append(output_lang.index2word[ni])
-#
-#         decoder_input = Variable(torch.LongTensor([[ni]]))
-#         decoder_input = decoder_input.cuda() if use_cuda else decoder_input
+        decoder_input = Variable(torch.LongTensor([SOS_token])).cuda()
+        decoder_hidden = encoder_hidden
+        decoder_output_list = []
+        for index in range(MAX_LENGTH):
+            decoder_output, decoder_hidden, decoder_attention = decoder(
+                decoder_input, decoder_hidden, encoder_outputs)
+            _, topi = decoder_output.data.topk(1)
+            if topi[0][0] == EOS_token:
+                break
+            else:
+                decoder_input = Variable(torch.LongTensor([topi[0][0]])).cuda()
+                decoder_output_list.append(output_lang.index2word[topi[0][0]])
 
-#     return decoded_words, decoder_attentions[:di + 1]
+        print(translate_words(input_lang, input_var.data.cpu()))
+        print(translate_words(output_lang, groundtruth_var.data.cpu()))
+        print('>> {}'.format(decoder_output_list))
+
+def translate_words(lang, tensors):
+    return ' '.join(lang.index2word[t] for t in tensors)
+
 #
 # def evaluateRandomly(encoder, decoder, n=10):
 #     for i in range(n):
@@ -320,7 +306,8 @@ hidden_size = 1024
 encoder = EncoderRNN(input_lang.n_words, hidden_size).cuda()
 attention_decoder = AttnDecoderRNN(hidden_size, output_lang.n_words, dropout=0.1).cuda()
 
-train(pairs, encoder, attention_decoder, 10000)
+train(pairs, encoder, attention_decoder, 1000)
+evaluate(pairs, encoder, attention_decoder)
 
 writer.close()
 
